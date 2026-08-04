@@ -1,0 +1,22 @@
+[project]
+name = "mdtex"
+version = "0.1.0"
+description = "Convert Tear Labs article-markdown (front matter, TeX math, [@N] cites, {{placeholders}}) into an arXiv-ready single-column LaTeX preprint."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tear Labs" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

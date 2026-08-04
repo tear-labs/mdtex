@@ -1,0 +1,283 @@
+\documentclass[11pt]{article}
+\pdfoutput=1
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+\hypersetup{pdftitle={Naked Von Neumann: VN Entropy is Better and Faster for JEPA},pdfauthor={Lev Stambler}}
+
+\title{Naked Von Neumann: VN Entropy is Better and Faster for JEPA\thanks{Interactive version: \url{https://research.tearlabs.ai/__naked-vn/}.}}
+\author{Lev Stambler\\ Tear Labs}
+\date{July 27, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Joint-embedding predictive architectures avoid representational collapse through a regularizer; LeJEPA's SIGReg pushes projected features toward an isotropic Gaussian. In a controlled objective swap that keeps the encoder, MLP projector, augmentations, optimizer, and evaluations fixed, we replace SIGReg with a von Neumann entropy term over the normalized embeddings' Gram matrix plus pairwise view alignment. On CIFAR-10/ResNet-18 the VN objective reaches every shared frozen-accuracy threshold in 3--6\(\times\) fewer epochs and 2.15--4.62\(\times\) less GPU time, and finishes higher on all five frozen readouts; on Imagenette/ViT-S it is higher on all three (+13.1 ridge points). Cheap screens on tabular, audio, and video data show VN winning each main readout. A projector ablation shows the MLP projector remains important for transfer. The objective family is I-VNE+/VNE's; the contribution is the controlled head-to-head against SIGReg measured as time-to-quality.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Joint-embedding predictive architectures (JEPA)\cite{ref14,ref15} are a form of self-supervised learning (SSL) which aim to learn a representation of its inputs without \textbf{any} labeling. Rather than labels, JEPA simply requires multiple augmented views of each piece of data in the dataset.\footnote{One can argue the augmentation function is still a supervised signal: it is chosen conditional on the data, encoding what should not matter about each input.}
+The goal is to learn a useful (and implicit) representation of the data.
+
+Alignment alone is insufficient to learn a good representation. A model can cheat by mapping every input to one point: thus all augmented points share the same representation.
+Thus, in LeJEPA\cite{ref1} and similar works\cite{ref5,ref6,ref7} SIGReg (or some other regularizer) is added which pushes the projected features towards an isotropic Gaussian (or some other geometry).
+
+We focus in on the regularizer in this note though we also explore other simplifications to the JEPA objective.
+Keeping the same encoder, MLP projector, augmentations, optimizer, and evaluations, we swap out the SIGReg auxiliary loss term for a von Neumann (VN) entropy loss which maximizes the spectral entropy of the normalized embeddings' Gram matrix:
+
+\begin{equation*}
+\underbrace{(1 - \lambda)\, \mathcal{L}_{\mathrm{inv}} + \lambda \, T_{\mathrm{EP}}}_{\text{SIGReg (LeJEPA)}} \quad\longrightarrow\quad \underbrace{\mathbb{E}_{i<j}\!\left[\, 1 - \cos(u_i, u_j) \,\right] - \beta \, \frac{S(\rho)}{\log r}}_{\text{VN (this note)}}
+\end{equation*}
+
+The objective is not new (I-VNE+ 2022\cite{ref2}, VNE CVPR 2023\cite{ref3}), and I-VNE+ already trained it non-contrastively --- positive pairs only, no negatives. What is new, as far as the author is aware, is the head-to-head against SIGReg on a modern JEPA substrate: matched protocols, separately tuned, measured as time-to-quality. Concurrent JEPA work varies the target distribution\cite{ref16} rather than swapping in a spectral objective, and no VN-versus-SIGReg comparison appears in the literature to date.
+
+Findings:
+
+\begin{itemize}
+\item CIFAR-10 / ResNet-18\footnote{CIFAR-10\cite{ref17} is the standard small-image benchmark: 60,000 32\(\times\)32 color photos in 10 classes (airplane, car, bird, \dots{}), 50k train / 10k test. CIFAR-100 is its companion set with 100 finer-grained classes; ``CIFAR-100 transfer'' trains readouts on CIFAR-100 labels over features that were learned on CIFAR-10 --- a test of whether the features generalize beyond their pretraining distribution. ResNet-18\cite{ref18} is a standard small convolutional encoder (\(\sim\)11M parameters).}: VN hits every shared frozen-accuracy threshold in 3--6\(\times\) fewer epochs, 2.15--4.62\(\times\) less GPU time.
+\item Final frozen readouts: VN higher on all five CIFAR readouts and all three Imagenette / ViT-S readouts (+13.1 ridge points there). 8/8 overall.
+\item Outside images (tabular, audio, video): VN wins each main readout, but SIGReg wins kNN on tabular and audio. Cheap screens, one seed for tabular --- boundary evidence only.
+\item The ``naked'' variant drops the MLP projector entirely. VN still trains, but loses \(\sim\)4 points on CIFAR-10 and 12.5--15.6 points on CIFAR-100 transfer, so the projector stays in the main recipe (Figure 9, appendix).
+\end{itemize}
+
+\section{VN Entropy Objective}
+\label{sec:objective}
+
+Both arms share the pipeline in Figure 1. Only the loss on the projector outputs differs.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-1.pdf}
+\caption{Figure 1 caption.}
+\label{fig:1}
+\end{figure}
+
+VN: stack the \(\ell_2\)-normalized projector outputs as rows of $U$, form the trace-normalized Gram matrix, maximize its entropy alongside view alignment\footnote{Backprop through \texttt{torch.linalg.eigvalsh} uses a closed-form backward, not the solver: Hellmann--Feynman gives $\partial \lambda_i / \partial A = q_i q_i^{\top}$, hence $\partial L / \partial A = Q\, \mathrm{diag}(\partial L / \partial \lambda)\, Q^{\top}$. Eigengap factors $1/(\lambda_i - \lambda_j)$ only enter eigen\emph{vector} derivatives, so a spectral function like $S(\rho)$ stays differentiable at crossings; near-zero eigenvalues are clamped before the $\log$.}:
+
+\begin{equation*}
+\rho = \frac{UU^{\top}}{\operatorname{Tr}(UU^{\top})}, \qquad S(\rho) = -\operatorname{Tr}(\rho \log \rho) = -\sum_k \lambda_k \log \lambda_k
+\end{equation*}
+
+\begin{equation*}
+\mathcal{L}_{\mathrm{VN}} = \mathbb{E}_{i<j}\!\left[\, 1 - \cos(u_i, u_j) \,\right] - \beta \, \frac{S(\rho)}{\log r}
+\end{equation*}
+
+\begin{itemize}
+\item Maximizing $S(\rho)$ pushes the nonzero eigenvalues toward uniform.
+\item Collapse puts all spectral mass in one eigenvalue, so the entropy gradient opposes it directly.
+\item $\exp S(\rho)$ is the effective rank\cite{ref4}: how many dimensions the representation uses. It is the main diagnostic in the geometry section.
+\end{itemize}
+
+SIGReg\cite{ref1} instead matches the raw embedding distribution to an isotropic Gaussian, testing random 1-D projections through characteristic functions:
+
+\begin{equation*}
+\mathcal{L}_{\mathrm{SIGReg}} = (1 - \lambda)\, \mathcal{L}_{\mathrm{inv}} + \lambda \, T_{\mathrm{EP}}
+\end{equation*}
+
+$T_{\mathrm{EP}}$ is a sliced normality test (Epps--Pulley): draw random unit directions $a$, project the embeddings $z_j$ onto each, and compare the projection's empirical characteristic function against the standard normal's:
+
+\begin{equation*}
+T_{\mathrm{EP}} = \mathbb{E}_{a}\!\left[ \int \big|\, \hat{\varphi}_{a}(t) - e^{-t^{2}/2} \big|^{2}\, w(t)\, dt \right], \qquad \hat{\varphi}_{a}(t) = \tfrac{1}{n} \textstyle\sum_{j} e^{\, i t\, a^{\top} z_{j}}
+\end{equation*}
+
+The lower card of Figure 1 shows the picture: each direction gives a 1-D histogram of projections, and SIGReg penalizes its distance from $N(0, 1)$.
+
+Note that the VN constraint is in some sense ``weaker.'' SIGReg specifies a target set of distributions while VN simply says that the spectral energy of the Gram matrix must be spread out. A VN win means the stronger target isn't needed in these settings, not that SIGReg's theory is wrong.
+
+\begin{center}
+\begin{tabular}{@{}p{0.2\linewidth}p{0.37\linewidth}p{0.37\linewidth}@{}}
+\toprule
+ & \textbf{VN entropy} & \textbf{SIGReg} \\
+\midrule
+\textbf{What is shaped} & Eigenvalues of the trace-normalized Gram matrix & Distributions of random 1-D projections \\
+\textbf{Desired state} & Flat nonzero spectrum: second-order isotropy & Isotropic Gaussian, beyond covariance \\
+\textbf{Information used} & Second-order spectrum & Characteristic-function discrepancies \\
+\textbf{Implementation cost} & Eigendecomposition per batch & Number and quality of random slices \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Figure 2 shows the mechanism: spread the vectors and the spectrum flattens, raising effective rank.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-2.pdf}
+\caption{Figure 2 caption.}
+\label{fig:2}
+\end{figure}
+
+Prior work: this is the I-VNE+\cite{ref2} / VNE\cite{ref3} objective family ($UU^{\top}$ and the feature covariance share nonzero eigenvalues). Related second-order anti-collapse methods: whitening\cite{ref5}, Barlow Twins\cite{ref6}, VICReg\cite{ref7}, dimensional-collapse analysis\cite{ref8}, maximum entropy coding\cite{ref9}, the Vendi score\cite{ref10}, matrix information theory\cite{ref11}. VN trains on the rank diagnostic itself.
+
+\section{Faster}
+\label{sec:faster}
+
+Setup: CIFAR-10 / ResNet-18, three seeds per arm, 120 epochs. Frozen checkpoints at 11 epochs, evaluated with a ridge probe and a parameter-free cosine kNN.\footnote{Every readout keeps the encoder frozen and attaches the simplest possible classifier to its features. Ridge: a closed-form linear classifier with \(\ell_2\) regularization. Linear probe: a linear classifier trained by gradient descent. kNN: label each test image by the majority vote of its k = 20 nearest training features under cosine similarity --- no trained parameters at all, so it cannot flatter weak features through probe tuning. ``Hitting a frozen-accuracy threshold'' means a readout reaching a given accuracy.} Each arm tuned separately.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-3.pdf}
+\caption{Figure 3 caption.}
+\label{fig:3}
+\end{figure}
+
+\begin{itemize}
+\item Epoch-1 ridge accuracy: VN 58.0 vs 46.0.
+\item VN passes SIGReg's final 120-epoch accuracy by epoch 20.
+\item All 24 paired threshold crossings favor VN: 3--6\(\times\) in epochs, 2.15--4.62\(\times\) in GPU seconds. A VN epoch costs \(\sim\)31\% more GPU time (the eigendecomposition).
+\end{itemize}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-4.pdf}
+\caption{Figure 4 caption.}
+\label{fig:4}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-5.pdf}
+\caption{Figure 5 caption.}
+\label{fig:5}
+\end{figure}
+
+Caveat: all numbers are frozen-checkpoint evaluations. Online probes can behave differently; we don't report them.
+
+\section{Stronger}
+\label{sec:stronger}
+
+Final frozen readouts (Figure 6):
+
+\begin{itemize}
+\item CIFAR-10: ridge 91.1 vs 86.0, linear probe 92.1 vs 87.8, kNN 88.9 vs 84.4.
+\item CIFAR-100 transfer: kNN 39.0 vs 32.1, probe 46.0 vs 41.7.
+\item Imagenette / ViT-S\footnote{Imagenette\cite{ref19}: a 10-class subset of ImageNet (\(\sim\)13k higher-resolution photos of easily distinguished classes) curated by fast.ai. ViT-S\cite{ref20} is a small Vision Transformer (\(\sim\)22M parameters) --- a second encoder family, checking the result is not ResNet-specific.}: ridge 86.2 vs 73.1; both CIFAR-100 transfer readouts also higher.
+\end{itemize}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-6.pdf}
+\caption{Figure 6 caption.}
+\label{fig:6}
+\end{figure}
+
+Non-image screens (Table 1)\footnote{CoverType\cite{ref21}: predict a forest's cover type (7 classes) from 54 cartographic features --- a standard tabular benchmark, trained SCARF-style\cite{ref22} with random feature corruption as the augmentation. Speech Commands\cite{ref23}: one-second audio clips of 35 spoken keywords. UCF101\cite{ref24}: \(\sim\)13k short video clips spanning 101 human actions.}: VN wins the main readout in all three domains; SIGReg wins kNN on CoverType and Speech Commands. Minimal tuning, one seed for CoverType.
+
+\begin{table}[t]\centering\begin{tabular}{@{}ll@{}}\toprule
+Domain & VN \\
+\midrule
+stub & 0 \\
+\bottomrule\end{tabular}\caption{Stub.}\label{tab:modalities}\end{table}
+
+\section{Geometry}
+\label{sec:geometry}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-7.pdf}
+\caption{Figure 7 caption.}
+\label{fig:7}
+\end{figure}
+
+Measured PCA of frozen backbone features (Figure 7):
+
+\begin{itemize}
+\item Full-space 1-NN: VN 72.7 vs 66.3.
+\item VN's top two components explain less variance (8.8\% vs 12.8\%): the information sits in more dimensions, so 2-D plots undersell it.
+\end{itemize}
+
+Projector spectra from a separate audit (Figure 8a, 1,024 test images): VN effective rank 326.4 \(\pm\) 2.3 of 512; SIGReg 38.9 \(\pm\) 0.3.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-8.pdf}
+\caption{Figure 8 caption.}
+\label{fig:8}
+\end{figure}
+
+Panel b tracks backbone effective rank during training, under two definitions:
+
+\begin{itemize}
+\item Raw covariance: SIGReg falls to \(\sim\)4 while its accuracy rises (a few directions carry nearly all variance); VN grows to 163.
+\item \(\ell_2\)-normalized features first: SIGReg 77, VN 178.
+\end{itemize}
+
+Both are shown because they disagree about SIGReg. Either way VN is much higher-rank. This is correlation with frozen accuracy, not a causal claim.
+
+\section{Discussion}
+\label{sec:discussion}
+
+Why wasn't this already known? Mostly chronology: I-VNE+/VNE (2022--23)\cite{ref2,ref3} predate SIGReg (Nov 2025)\cite{ref1}, and LeJEPA doesn't cite VNE. Beyond timing, VNE's ImageNet-1k result was mid-table (72.1 vs 74.3 for BYOL\cite{ref12}, 75.3 for SwAV\cite{ref13}), the entropy sign is task-dependent (VNE also reports settings where reducing entropy helps), and a spectral loss needs an eigendecomposition where SIGReg is linear-time and distributed-friendly. SSL papers also report endpoint accuracy at fixed budgets, so time-to-quality --- where VN's advantage is largest --- mostly went unmeasured.
+
+This note does not establish superiority across domains, scales, batch sizes, or distributed regimes (the largest run is a ViT-S on Imagenette). It does not make spectrum matching equivalent to Gaussian matching, and the objective itself is I-VNE+/VNE's, not ours. Whether the eigendecomposition stays cheap and stable at LeJEPA scale is the next experiment.
+
+What holds: under matched, separately tuned protocols, swapping SIGReg for VN entropy trains 3--6\(\times\) faster and produces better frozen representations in both image settings tested.
+
+\section{Appendix}
+\label{sec:appendix}
+
+\textbf{Protocol.} CIFAR-10 / ResNet-18: 120 epochs, batch 512, three seeds per arm, two global and six local crops, frozen evaluation at 11 checkpoints (ridge, full linear probe, cosine kNN-20, CIFAR-100 transfer probes at selected checkpoints). Imagenette / ViT-S: same conventions, three seeds. Tuned settings: SIGReg lr 0.001, \(\lambda\) 0.02; VN lr 0.01. GPU seconds measured per epoch on the training device.
+
+\textbf{Projector ablation (the ``naked'' in the title).} VN keeps training with the MLP projector removed --- the loss runs directly on backbone features. Quality drops though (Figure 9): \(\sim\)4 points in-domain (p100 85.9 vs 90.2, kNN 83.1 vs 87.1) and far more on transfer (CIFAR-100 kNN 36.3 vs 48.8, probe 42.6 vs 58.2). The projector looks like part of the generalizing substrate, not an artifact, so it stays in the recipe for both arms.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/fig-9.pdf}
+\caption{Figure 9 caption.}
+\label{fig:9}
+\end{figure}
+
+\textbf{Data.} Every number and figure on this page is read from \texttt{data/results.json}, generated from the committed per-run CSVs. The build fails if headline claims drift from the raw data.
+
+\paragraph{Provenance.} Stub.
+
+\textbf{Citing this note.} Code and data: \href{https://github.com/tear-labs/nakedvn-experiments}{github.com/tear-labs/nakedvn-experiments}. A PDF snapshot is on arXiv; this page is the primary version.
+
+\begin{verbatim}
+@misc{stambler2026nakedvn,
+  title         = {Naked Von Neumann: VN Entropy is Better and Faster for JEPA},
+  author        = {Stambler, Lev},
+  year          = {2026},
+  month         = {July},
+  institution   = {Tear Labs},
+  url           = {https://research.tearlabs.ai/__naked-vn/},
+  note          = {arXiv ID pending}
+}
+\end{verbatim}
+
+\begin{thebibliography}{24}
+\bibitem{ref1} Balestriero, R. and LeCun, Y. \href{https://arxiv.org/abs/2511.08544}{LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics}. arXiv:2511.08544, 2025.
+\bibitem{ref2} Kim, J. and Rhee, W. \href{https://openreview.net/forum?id=J7FaSJw-xCM}{Mutual Information Estimation as a Difference of Entropies for Unsupervised Representation Learning} (I-VNE+). OpenReview, 2022 (withdrawn ICLR submission).
+\bibitem{ref3} Kim, J., Kang, S., Hwang, D., Shin, J., and Rhee, W. \href{https://openaccess.thecvf.com/content/CVPR2023/html/Kim_VNE_An_Effective_Method_for_Improving_Deep_Representation_by_Manipulating_CVPR_2023_paper.html}{VNE: An Effective Method for Improving Deep Representation by Manipulating Eigenvalue Distribution}. CVPR 2023. \href{https://github.com/jaeill/CVPR23-VNE}{Code}.
+\bibitem{ref4} Garrido, Q., Balestriero, R., Najman, L., and LeCun, Y. \href{https://arxiv.org/abs/2210.02885}{RankMe: Assessing the Downstream Performance of Pretrained Self-Supervised Representations by Their Rank}. ICML 2023.
+\bibitem{ref5} Ermolov, A., Siarohin, A., Sangineto, E., and Sebe, N. \href{https://proceedings.mlr.press/v139/ermolov21a.html}{Whitening for Self-Supervised Representation Learning}. ICML 2021.
+\bibitem{ref6} Zbontar, J., Jing, L., Misra, I., LeCun, Y., and Deny, S. \href{https://proceedings.mlr.press/v139/zbontar21a.html}{Barlow Twins: Self-Supervised Learning via Redundancy Reduction}. ICML 2021.
+\bibitem{ref7} Bardes, A., Ponce, J., and LeCun, Y. \href{https://openreview.net/forum?id=xm6YD62D1Ub}{VICReg: Variance-Invariance-Covariance Regularization for Self-Supervised Learning}. ICLR 2022.
+\bibitem{ref8} Jing, L., Vincent, P., LeCun, Y., and Tian, Y. \href{https://arxiv.org/abs/2110.09348}{Understanding Dimensional Collapse in Contrastive Self-Supervised Learning}. ICLR 2022.
+\bibitem{ref9} Liu, X., Wang, Z., Li, Y., and Wang, S. \href{https://proceedings.neurips.cc/paper_files/paper/2022/hash/dc709714c52b35f2f34aca2a92b06bc8-Abstract-Conference.html}{Self-Supervised Learning via Maximum Entropy Coding}. NeurIPS 2022.
+\bibitem{ref10} Friedman, D. and Dieng, A.~B. \href{https://arxiv.org/abs/2210.02410}{The Vendi Score: A Diversity Evaluation Metric for Machine Learning}. TMLR 2023.
+\bibitem{ref11} Zhang, Y., Tan, Z., Yang, J., Huang, W., and Yuan, Y. \href{https://arxiv.org/abs/2305.17326}{Matrix Information Theory for Self-Supervised Learning}. arXiv:2305.17326, 2023.
+\bibitem{ref12} Grill, J.-B., et~al. \href{https://arxiv.org/abs/2006.07733}{Bootstrap Your Own Latent: A New Approach to Self-Supervised Learning}. NeurIPS 2020.
+\bibitem{ref13} Caron, M., Misra, I., Mairal, J., Goyal, P., Bojanowski, P., and Joulin, A. \href{https://arxiv.org/abs/2006.09882}{Unsupervised Learning of Visual Features by Contrasting Cluster Assignments}. NeurIPS 2020.
+\bibitem{ref14} LeCun, Y. \href{https://openreview.net/forum?id=BZ5a1r-kVsf}{A Path Towards Autonomous Machine Intelligence}. OpenReview, 2022.
+\bibitem{ref15} Assran, M., Duval, Q., Misra, I., Bojanowski, P., Vincent, P., Rabbat, M., LeCun, Y., and Ballas, N. \href{https://arxiv.org/abs/2301.08243}{Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture} (I-JEPA). CVPR 2023.
+\bibitem{ref16} Kuang, Y., Dagade, Y., Rudner, T.~G.~J., Balestriero, R., and LeCun, Y. \href{https://arxiv.org/abs/2602.01456}{Rectified LpJEPA: Joint-Embedding Predictive Architectures with Sparse and Maximum-Entropy Representations}. arXiv:2602.01456, 2026.
+\bibitem{ref17} Krizhevsky, A. \href{https://www.cs.toronto.edu/~kriz/learning-features-2009-TR.pdf}{Learning Multiple Layers of Features from Tiny Images}. Technical report, University of Toronto, 2009.
+\bibitem{ref18} He, K., Zhang, X., Ren, S., and Sun, J. \href{https://arxiv.org/abs/1512.03385}{Deep Residual Learning for Image Recognition}. CVPR 2016.
+\bibitem{ref19} Howard, J. \href{https://github.com/fastai/imagenette}{Imagenette}. fast.ai dataset release, 2019.
+\bibitem{ref20} Dosovitskiy, A., et~al. \href{https://arxiv.org/abs/2010.11929}{An Image is Worth 16\(\times\)16 Words: Transformers for Image Recognition at Scale}. ICLR 2021.
+\bibitem{ref21} Blackard, J.~A. and Dean, D.~J. \href{https://archive.ics.uci.edu/dataset/31/covertype}{Comparative accuracies of artificial neural networks and discriminant analysis in predicting forest cover types from cartographic variables}. Computers and Electronics in Agriculture, 1999.
+\bibitem{ref22} Bahri, D., Jiang, H., Tay, Y., and Metzler, D. \href{https://arxiv.org/abs/2106.15147}{SCARF: Self-Supervised Contrastive Learning using Random Feature Corruption}. ICLR 2022.
+\bibitem{ref23} Warden, P. \href{https://arxiv.org/abs/1804.03209}{Speech Commands: A Dataset for Limited-Vocabulary Speech Recognition}. arXiv:1804.03209, 2018.
+\bibitem{ref24} Soomro, K., Zamir, A.~R., and Shah, M. \href{https://arxiv.org/abs/1212.0402}{UCF101: A Dataset of 101 Human Actions Classes From Videos in The Wild}. arXiv:1212.0402, 2012.
+\end{thebibliography}
+
+\end{document}
